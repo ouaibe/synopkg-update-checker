@@ -901,12 +901,10 @@ fi
 # - download_apps: package names
 # - downlaod_revisions: new version numbers
 # - download_links: download URLs for .spk files
-# - downlaod_files: local file paths after download
 #-----------------------------------------------------------------------------
 declare -a download_apps=()
 declare -a downlaod_revisions=()
 declare -a download_links=()
-declare -a downlaod_files=()
 
 # Count total installed packages
 total_installed_packages=0
@@ -1261,8 +1259,8 @@ for app in $(synopkg list --name | LC_ALL=C sort -f); do
 done
 
 #-----------------------------------------------------------------------------
-# DOWNLOAD UPDATEABLE PACKAGES
-# If any packages have updates available, print download links and download .spk files
+# DOWNLOAD LINKS FOR UPDATEABLE PACKAGES
+# Print available update links; actual downloads happen on demand during installation
 #-----------------------------------------------------------------------------
 
 # Print download links if any updates are available
@@ -1315,29 +1313,6 @@ EOF
         fi
     done
 
-    if [ "$INFO_MODE" = false ]; then
-        printf "\n\n"
-        printf "Downloading updateable packages\n"
-        printf "%s\n" "============================================="
-        # Download the spk files into the downloads directory if not in dry run mode
-        idx=0
-        for idx in $(seq 0 $((amount - 1))); do
-            url="${download_links[$idx]}"
-            spk_name=$(basename "$url")
-            filePath="$(realpath "$download_dir_pkg/$spk_name")"
-            downlaod_files+=("$filePath")
-            if [ "$DRY_RUN" = true ]; then
-                printf "[DRY RUN MODE] Skipping download of %s\n" $(basename "$url")
-            else
-                printf "\n"
-                printf "Downloading %s...\n"
-                printf "Package: %s\n" "${download_apps[$idx]}"
-                printf "File: %s\n" "$spk_name"
-                printf "Path: %s\n" "$filePath"
-                wget -q --show-progress -O "$filePath" "$url"
-            fi
-        done
-    fi
 fi
 
 #-----------------------------------------------------------------------------
@@ -1518,6 +1493,44 @@ if [ "$DRY_RUN" = true ]; then
     printf "\n\n[SIMULATION MODE] Running in dry-run mode. No changes will be made.\n"
 fi
 
+# Download a package only when the user explicitly requested an installation.
+download_package_file() {
+    local index="$1"
+    local url="${download_links[$index]}"
+    local app_name="${download_apps[$index]}"
+
+    if [ -z "$url" ]; then
+        echo "Error: Missing download URL for package $app_name"
+        return 1
+    fi
+
+    selected_file="$download_dir_pkg/$(basename "$url")"
+
+    if [ -f "$selected_file" ]; then
+        [ "$DEBUG" = true ] && echo "[DEBUG] Reusing already downloaded file: $selected_file"
+        return 0
+    fi
+
+    if [ "$DRY_RUN" = true ]; then
+        return 0
+    fi
+
+    printf "\n"
+    printf "Downloading package before installation...\n"
+    printf "Package: %s\n" "$app_name"
+    printf "URL: %s\n" "$url"
+    printf "Path: %s\n" "$selected_file"
+
+    wget -q --show-progress -O "$selected_file" "$url"
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to download package $app_name from $url"
+        rm -f "$selected_file"
+        return 1
+    fi
+
+    return 0
+}
+
 printf "\n"
 printf "Select packages to update:\n"
 printf "==========================\n"
@@ -1540,7 +1553,10 @@ while [ ${#download_apps[@]} -gt 0 ]; do
                 read -p "Are you sure you want to update ALL packages? (y/n): " confirm_all
                 if [[ "$confirm_all" == "y" || "$confirm_all" == "Y" ]]; then
                     for index in "${!download_apps[@]}"; do
-                        selected_file="${downlaod_files[$index]}"
+                        if ! download_package_file "$index"; then
+                            printf "Skipping %s due to download failure.\n" "${download_apps[$index]}"
+                            continue
+                        fi
                         if [[ -f "$selected_file" || "$DRY_RUN" = true ]]; then
                             printf "\n"
                             printf "Package to update: %s\n" "${download_apps[$index]}"
@@ -1594,13 +1610,16 @@ while [ ${#download_apps[@]} -gt 0 ]; do
             *)
                 if [[ "$REPLY" -ge 1 && "$REPLY" -le ${#download_apps[@]} ]]; then
                     index=$((REPLY - 1))
-                    selected_file="${downlaod_files[$index]}"
-                    if [[ -f "$selected_file" || "$DRY_RUN" = true ]]; then
-                        printf "\n"
-                        printf "You selected to update package: %s\n" "${download_apps[$index]}"
-                        # Ask user to confirm installation
-                        read -p "Are you sure you want to update this package? (y/n): " confirm
-                        if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
+                    printf "\n"
+                    printf "You selected to update package: %s\n" "${download_apps[$index]}"
+                    # Ask user to confirm installation
+                    read -p "Are you sure you want to update this package? (y/n): " confirm
+                    if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
+                        if ! download_package_file "$index"; then
+                            printf "Installation cancelled due to download failure.\n"
+                            break
+                        fi
+                        if [[ -f "$selected_file" || "$DRY_RUN" = true ]]; then
                             if [ "$DRY_RUN" = true ]; then
                                 printf "[DRY RUN MODE] Skipping installation of %s\n" $(basename "$selected_file")
                             else
@@ -1639,19 +1658,18 @@ while [ ${#download_apps[@]} -gt 0 ]; do
 
                             # Remove the selected item from arrays
                             download_apps=("${download_apps[@]:0:$index}" "${download_apps[@]:$((index+1))}")
-                            download_files=("${download_files[@]:0:$index}" "${download_files[@]:$((index+1))}")
+                            downlaod_revisions=("${downlaod_revisions[@]:0:$index}" "${downlaod_revisions[@]:$((index+1))}")
+                            download_links=("${download_links[@]:0:$index}" "${download_links[@]:$((index+1))}")
                             if [ ${#download_apps[@]} -eq 0 ]; then
                                 printf "\n"
                                 printf "================================\n"
                                 echo "All packages processed. Exiting."
                                 break 2
                             fi
-                        else
-                            printf "Installation cancelled by user.\n"
-                            printf "Starting over selection.\n"
                         fi
                     else
-                        printf "Error: File %s does not exist.\n" "$selected_file"
+                        printf "Installation cancelled by user.\n"
+                        printf "Starting over selection.\n"
                     fi
                 else
                     printf "%s\n" "==> Wrong input, please retry..."

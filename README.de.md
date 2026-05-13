@@ -13,7 +13,7 @@ Das Skript unterstützt aktuell:
   - offizielle Synology-Pakete
   - SynoCommunity-Pakete
   - GitHub-Releases, wenn der Paket-Distributor auf GitHub verweist
-- interaktive Installation heruntergeladener Paket-Updates
+- interaktive Installation mit bedarfsgesteuertem Download erst nach Bestätigung
 - optionalen HTML-E-Mail-Bericht mit klickbaren Links und Quell-Badges
 - Filter für laufende Pakete, offizielle Pakete, Community-Pakete sowie reine OS- oder Paketprüfungen
 
@@ -125,9 +125,9 @@ In der Terminalausgabe bleibt die Spalte **Update** bewusst schlicht:
    - passende Download-URLs für aktualisierbare Pakete sammeln
 
 4. Im normalen Modus:
-   - Paketdateien nach `downloads/packages/` herunterladen
-   - interaktives Auswahlmenü anzeigen
-   - gewählte Pakete nach Bestätigung installieren
+  - Download-Links für aktualisierbare Pakete sammeln und anzeigen
+  - interaktives Auswahlmenü anzeigen
+  - nach Bestätigung nur die ausgewählten Pakete herunterladen und installieren
 
 5. Aufräumen:
    - temporäres Download-Verzeichnis nach dem Lauf entfernen
@@ -178,7 +178,7 @@ In der Terminalausgabe bleibt die Spalte **Update** bewusst schlicht:
 ./bin/synopkg-update-checker.sh --dry-run
 ```
 
-### Verfügbare Paket-Updates herunterladen und installieren
+### Verfügbare Paket-Updates auswählen und installieren (Download bei Bedarf)
 
 ```bash
 sudo ./bin/synopkg-update-checker.sh

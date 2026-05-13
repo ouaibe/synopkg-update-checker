@@ -13,7 +13,7 @@ This script currently supports:
   - official Synology packages
   - SynoCommunity packages
   - GitHub releases when a package distributor points to GitHub
-- interactive installation of downloaded package updates
+- interactive installation with on-demand package downloads after confirmation
 - optional HTML email reporting with clickable links and source badges
 - filters for running packages, official packages, community packages, OS-only, or packages-only checks
 
@@ -125,9 +125,9 @@ The terminal table still uses simple values in the **Update** column:
    - collect matching download URLs for updateable packages
 
 4. In normal mode:
-   - download package files to `downloads/packages/`
-   - present an interactive selection menu
-   - install chosen packages with confirmation
+  - collect and display download links for updateable packages
+  - present an interactive selection menu
+  - after confirmation, download only the selected package(s) and install them
 
 5. Cleanup:
    - remove the temporary download directory when the run is finished
@@ -178,7 +178,7 @@ The terminal table still uses simple values in the **Update** column:
 ./bin/synopkg-update-checker.sh --dry-run
 ```
 
-### Download and install available package updates
+### Select and install available package updates (download on demand)
 
 ```bash
 sudo ./bin/synopkg-update-checker.sh
