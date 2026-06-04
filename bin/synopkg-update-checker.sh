@@ -14,6 +14,7 @@ DRY_RUN=false
 INFO_MODE=false
 EMAIL_MODE=false
 EMAIL_TO=""
+EMAIL_UPDATES_ONLY=false
 RUNNING_ONLY=false
 VERBOSE=false
 DEBUG=false
@@ -21,6 +22,7 @@ OFFICIAL_ONLY=false
 COMMUNITY_ONLY=false
 OS_ONLY=false
 PACKAGES_ONLY=false
+os_update_avail=false
 
 #-----------------------------------------------------------------------------
 # USAGE FUNCTION
@@ -34,6 +36,8 @@ usage() {
         -i, --info          Display system and update information only,
                             like dry-run but without download messages and interactive installation
         -e, --email         Email mode - no output to stdout, only capture to variable (requires --info)
+        --email-updates-only Send email only when at least one update is available
+                    (works only with --email)
         --email-to <email>  Override recipient email address (optional, defaults to DSM configuration)
         -r, --running       Check updates only for packages that are currently running
         --official-only     Show only official Synology packages
@@ -405,7 +409,7 @@ EOF
 # Parse the command line arguments using getopt
 #-----------------------------------------------------------------------------
 filename=$(basename "$0")
-PARSED_OPTIONS=$(getopt -n "$filename" -o ienvrdh --long info,email,email-to:,dry-run,running,verbose,debug,official-only,community-only,os-only,packages-only,help -- "$@")
+PARSED_OPTIONS=$(getopt -n "$filename" -o ienvrdh --long info,email,email-updates-only,email-to:,dry-run,running,verbose,debug,official-only,community-only,os-only,packages-only,help -- "$@")
 retcode=$?
 if [ $retcode != 0 ]; then
     usage
@@ -427,6 +431,8 @@ while true; do
             EMAIL_MODE=true;
             INFO_MODE=true;
             shift ;;
+        --email-updates-only)
+            EMAIL_UPDATES_ONLY=true; shift ;;
         --email-to)
             EMAIL_TO="$2"; shift 2 ;;
         -r|--running)
@@ -676,7 +682,7 @@ os_archive_html=$(curl -s "$os_archive_url")
 #-----------------------------------------------------------------------------
 os_url=""
 os_latest=""
-os_update_avail="-"
+os_update_avail=false
 os_pat=""
 
 #-----------------------------------------------------------------------------
@@ -745,7 +751,7 @@ if [ $? -eq 0 ] && echo "$os_archive_html" | grep -q "href=\"/download/Os/$os_na
                     os_pat=$(echo "$os_version_html" | grep -oE '[a-zA-Z0-9_+-]+\.pat' | grep -iE "($model_escaped|_${model_series_escaped}|_${platform_name})" | head -1)
                     [ "$DEBUG" = true ] && echo "[DEBUG] Found .pat file: $os_pat"
                     os_latest="$os_version"
-                    os_update_avail="X"
+                    os_update_avail=true
 
                     # Extract URL - need to handle URL-encoded characters like %2B for +
                     # First, get all .pat URLs, then filter for our model
@@ -776,13 +782,17 @@ if [ $? -eq 0 ] && echo "$os_archive_html" | grep -q "href=\"/download/Os/$os_na
     # Set default if no update found
     if [ -z "$os_latest" ]; then
         os_latest="$os_installed_version"
-        os_update_avail="-"
+        os_update_avail=false
         os_pat=""
         os_url=""
     fi
 
     if [ "$INFO_MODE" = true ]; then
-        msg=$(printf "%-63s | %-15s | %-15s | %-6s\n" "$os_name" "$os_display_version" "$os_latest" "$os_update_avail")
+        os_update_display="-"
+        if [ "$os_update_avail" = true ]; then
+            os_update_display="X"
+        fi
+        msg=$(printf "%-63s | %-15s | %-15s | %-6s\n" "$os_name" "$os_display_version" "$os_latest" "$os_update_display")
         if [ "$EMAIL_MODE" = false ]; then
             printf "%s\n" "$msg"
         fi
@@ -791,7 +801,7 @@ if [ $? -eq 0 ] && echo "$os_archive_html" | grep -q "href=\"/download/Os/$os_na
         # Add row to HTML table for email
         if [ "$EMAIL_MODE" = true ]; then
             # Convert update status to icon for HTML
-            if [ "$os_update_avail" = "X" ]; then
+            if [ "$os_update_avail" = true ]; then
                 update_icon="<span style='font-size: 14px;'>🔴</span>"
                 # Make latest version clickable if download URL is available
                 if [ -n "$os_url" ]; then
@@ -808,7 +818,7 @@ if [ $? -eq 0 ] && echo "$os_archive_html" | grep -q "href=\"/download/Os/$os_na
         fi
 
         # Add download link right after the table if update is available
-        if [ "$os_update_avail" = "X" ] && [ -n "$os_url" ]; then
+        if [ "$os_update_avail" = true ] && [ -n "$os_url" ]; then
             msg=$(printf "\n*** OPERATING SYSTEM UPDATE AVAILABLE ***\n")
             if [ "$EMAIL_MODE" = false ]; then
                 printf "%s" "$msg"
@@ -834,9 +844,13 @@ if [ $? -eq 0 ] && echo "$os_archive_html" | grep -q "href=\"/download/Os/$os_na
             fi
         fi
     else
-        printf "%-63s | %-15s | %-15s | %-6s\n" "$os_name" "$os_display_version" "$os_latest" "$os_update_avail"
+        os_update_display="-"
+        if [ "$os_update_avail" = true ]; then
+            os_update_display="X"
+        fi
+        printf "%-63s | %-15s | %-15s | %-6s\n" "$os_name" "$os_display_version" "$os_latest" "$os_update_display"
         # Add download link or status message right after the table row
-        if [ "$os_update_avail" = "X" ] && [ -n "$os_url" ]; then
+        if [ "$os_update_avail" = true ] && [ -n "$os_url" ]; then
             printf "\n*** OPERATING SYSTEM UPDATE AVAILABLE ***\n"
             printf "\nDownload Link: %s\n" "$os_url"
         else
@@ -1413,6 +1427,25 @@ if [ "$INFO_MODE" = true ]; then
     fi
     # Send email if EMAIL_MODE is enabled
     if [ "$EMAIL_MODE" = true ]; then
+        if [ "$EMAIL_UPDATES_ONLY" = true ]; then
+            should_send_email=false
+
+            # OS updates are represented by os_update_avail=true
+            if [ "$os_update_avail" = true ]; then
+                should_send_email=true
+            fi
+
+            # Package updates are represented by a non-empty download_apps array
+            if [ ${#download_apps[@]} -gt 0 ]; then
+                should_send_email=true
+            fi
+
+            if [ "$should_send_email" = false ]; then
+                [ "$DEBUG" = true ] && echo "[DEBUG] --email-updates-only set and no updates found. Skipping email."
+                exit 0
+            fi
+        fi
+
         # Extract hostname for subject line
         hostname=$(hostname)
         email_subject="Synology Update Checker Report"
