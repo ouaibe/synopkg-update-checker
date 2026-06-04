@@ -13,6 +13,7 @@ This script currently supports:
   - official Synology packages
   - SynoCommunity packages
   - GitHub releases when a package distributor points to GitHub
+- compatibility-aware package evaluation based on SPK metadata (`os_min_ver` / `firmware`)
 - interactive installation with on-demand package downloads after confirmation
 - optional HTML email reporting with clickable links and source badges
 - filters for running packages, official packages, community packages, OS-only, or packages-only checks
@@ -42,6 +43,8 @@ This script currently supports:
 Options:
   -i, --info          Display system and update information only
   -e, --email         Send the report by email and automatically enable info mode
+  --email-updates-only
+                      In email mode, send a report only when at least one update is available
   --email-to <email>  Override the configured DSM recipient address
   -r, --running       Check updates only for currently running packages
   --official-only     Show only official Synology packages
@@ -60,6 +63,7 @@ Options:
 | --- | --- |
 | `-i`, `--info` | Prints a report only. No downloads and no installation menu. |
 | `-e`, `--email` | Sends the report as HTML email and automatically switches to info mode. No normal stdout report is produced. |
+| `--email-updates-only` | In combination with `--email`, sends a report only if at least one OS or package update is available. |
 | `--email-to <email>` | Uses a custom recipient instead of the DSM notification configuration. |
 | `-r`, `--running` | Limits package checks to services that are currently running. |
 | `--official-only` | Shows only official Synology packages. |
@@ -85,6 +89,31 @@ The script identifies package sources from the package INFO metadata in `/var/pa
   - SynoCommunity pages are checked directly when applicable
 
 For package downloads, the script now uses the package-specific `arch` value from each package INFO file, plus the system platform name, to find the best matching SPK file.
+
+For compatible update decisions, the script also inspects SPK metadata (`os_min_ver`, fallback `firmware`) and compares it with the currently installed DSM or BSM version.
+
+## Package table semantics
+
+The package section reports both actionable and non-actionable version states:
+
+- **Installed**: currently installed package version
+- **Latest Compatible**: newest package version compatible with the current OS
+- **Latest Available**: newest package version found upstream for the package source
+- **Min OS Req**: minimum OS required by the **Latest Available** package (if provided by SPK metadata)
+- **Update**:
+  - `X` when `Latest Compatible` is newer than `Installed`
+  - `-` when no compatible update is currently installable
+
+This makes it clear when a newer upstream package exists but requires a newer DSM or BSM version.
+
+Example:
+
+```text
+Package      | Installed   | Latest Compatible | Latest Available | Min OS Req   | Update
+FileStation  | 1.4.3-1610  | 1.4.3-1610        | 1.5.1-2410       | 7.4-101141   | -
+```
+
+Interpretation: a newer upstream version exists, but it is not installable on the current DSM/BSM version yet.
 
 ## Email report formatting
 
@@ -121,7 +150,8 @@ The terminal table still uses simple values in the **Update** column:
    - list installed packages in stable alphabetical order
    - detect each package source
    - apply active filters such as running-only or official-only
-   - compare installed and latest versions
+  - determine latest available and latest compatible versions
+  - validate candidate SPKs against current OS requirements (`os_min_ver` / `firmware`)
    - collect matching download URLs for updateable packages
 
 4. In normal mode:

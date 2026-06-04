@@ -23,6 +23,7 @@ COMMUNITY_ONLY=false
 OS_ONLY=false
 PACKAGES_ONLY=false
 os_update_avail=false
+LAST_SPK_MIN_OS_VERSION=""
 
 #-----------------------------------------------------------------------------
 # USAGE FUNCTION
@@ -111,6 +112,159 @@ is_official_package() {
         # If INFO file doesn't exist, assume unknown/community
         return 1
     fi
+}
+
+#-----------------------------------------------------------------------------
+# Function normalize_os_version()
+# Normalize OS version to major.minor.micro-build-smallfix for reliable compare
+#-----------------------------------------------------------------------------
+normalize_os_version() {
+    local version="$1"
+
+    if [[ "$version" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-([0-9]+)-([0-9]+)$ ]]; then
+        echo "$version"
+        return
+    fi
+
+    if [[ "$version" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-([0-9]+)$ ]]; then
+        echo "${BASH_REMATCH[1]}-${BASH_REMATCH[2]}-0"
+        return
+    fi
+
+    echo "$version"
+}
+
+#-----------------------------------------------------------------------------
+# Function is_version_gte()
+# Compare two normalized versions. Returns 0 if current >= required.
+#-----------------------------------------------------------------------------
+is_version_gte() {
+    local current_version="$1"
+    local required_version="$2"
+    local oldest
+
+    oldest=$(printf '%s\n%s\n' "$required_version" "$current_version" | sort -V | head -1)
+    [ "$oldest" = "$required_version" ]
+}
+
+#-----------------------------------------------------------------------------
+# Function get_spk_min_os_version()
+# Read os_min_ver (or firmware fallback) from SPK binary metadata
+#-----------------------------------------------------------------------------
+extract_min_os_from_metadata() {
+    local spk_metadata="$1"
+    local min_os_version=""
+
+    min_os_version=$(printf '%s\n' "$spk_metadata" | grep -oE 'os_min_ver="?[^"]+"?' | head -1 | cut -d'=' -f2- | tr -d '"\r')
+    if [ -z "$min_os_version" ]; then
+        min_os_version=$(printf '%s\n' "$spk_metadata" | grep -oE 'firmware="?[^"]+"?' | head -1 | cut -d'=' -f2- | tr -d '"\r')
+    fi
+
+    echo "$min_os_version"
+}
+
+#-----------------------------------------------------------------------------
+# Function extract_min_os_from_file()
+# Read os_min_ver/firmware directly from SPK file bytes (binary-safe)
+#-----------------------------------------------------------------------------
+extract_min_os_from_file() {
+    local spk_file="$1"
+    local min_os_version=""
+    local spk_metadata=""
+
+    # First try direct binary grep (works well for Synology SPK metadata blocks).
+    spk_metadata=$(grep -a -oE '(os_min_ver|firmware)="[^"]+"' "$spk_file" 2>/dev/null | head -50)
+    if [ -n "$spk_metadata" ]; then
+        min_os_version=$(extract_min_os_from_metadata "$spk_metadata")
+    fi
+
+    # Fallback to strings parsing if direct grep didn't find anything.
+    if [ -z "$min_os_version" ]; then
+        spk_metadata=$(strings -n 8 "$spk_file" 2>/dev/null)
+        if [ -z "$spk_metadata" ]; then
+            spk_metadata=$(strings "$spk_file" 2>/dev/null)
+        fi
+        min_os_version=$(extract_min_os_from_metadata "$spk_metadata")
+    fi
+
+    echo "$min_os_version"
+}
+
+get_spk_min_os_version() {
+    local spk_url="$1"
+    local min_os_version
+    local tmp_spk_file
+
+    tmp_spk_file=$(mktemp /tmp/spk_meta.XXXXXX 2>/dev/null)
+    if [ -z "$tmp_spk_file" ]; then
+        tmp_spk_file="/tmp/spk_meta_$$.tmp"
+        : > "$tmp_spk_file" 2>/dev/null || {
+            [ "$DEBUG" = true ] && echo "[DEBUG] Could not create temp file for SPK metadata extraction"
+            echo ""
+            return
+        }
+    fi
+
+    # Try ranged fetch first (fast) and parse from local file.
+    if curl -fsSL --range 0-2097151 "$spk_url" -o "$tmp_spk_file" 2>/dev/null; then
+        min_os_version=$(extract_min_os_from_file "$tmp_spk_file")
+    else
+        [ "$DEBUG" = true ] && echo "[DEBUG] Ranged download failed for SPK metadata extraction: $spk_url"
+    fi
+
+    # If not found, try full download with curl and parse from local file.
+    if [ -z "$min_os_version" ] && curl -fsSL "$spk_url" -o "$tmp_spk_file" 2>/dev/null; then
+        min_os_version=$(extract_min_os_from_file "$tmp_spk_file")
+    elif [ -z "$min_os_version" ]; then
+        [ "$DEBUG" = true ] && echo "[DEBUG] Full curl download failed for SPK metadata extraction: $spk_url"
+    fi
+
+    # Final fallback: full download with wget and parse from local file.
+    if [ -z "$min_os_version" ] && command -v wget >/dev/null 2>&1; then
+        if wget -q -O "$tmp_spk_file" "$spk_url" 2>/dev/null; then
+            min_os_version=$(extract_min_os_from_file "$tmp_spk_file")
+        else
+            [ "$DEBUG" = true ] && echo "[DEBUG] Full wget download failed for SPK metadata extraction: $spk_url"
+        fi
+    fi
+
+    rm -f "$tmp_spk_file"
+
+    echo "$min_os_version"
+}
+
+#-----------------------------------------------------------------------------
+# Function is_spk_compatible_with_os()
+# Check SPK minimum OS requirement against current installed OS version
+# Returns: 0 if compatible, 1 if incompatible
+#-----------------------------------------------------------------------------
+is_spk_compatible_with_os() {
+    local spk_url="$1"
+    local min_os_version
+    local required_os_version_normalized
+
+    if [ -z "$spk_url" ]; then
+        return 1
+    fi
+
+    min_os_version=$(get_spk_min_os_version "$spk_url")
+    LAST_SPK_MIN_OS_VERSION="$min_os_version"
+
+    # If no minimum version metadata is available, keep backward-compatible behavior.
+    if [ -z "$min_os_version" ]; then
+        [ "$DEBUG" = true ] && echo "[DEBUG] No os_min_ver/firmware metadata found for SPK: $spk_url"
+        return 0
+    fi
+
+    required_os_version_normalized=$(normalize_os_version "$min_os_version")
+
+    if is_version_gte "$CURRENT_OS_VERSION_NORMALIZED" "$required_os_version_normalized"; then
+        [ "$DEBUG" = true ] && echo "[DEBUG] SPK compatible (required: $min_os_version, current: $os_display_version): $spk_url"
+        return 0
+    fi
+
+    [ "$DEBUG" = true ] && echo "[DEBUG] SPK NOT compatible (required: $min_os_version, current: $os_display_version): $spk_url"
+    return 1
 }
 
 #-----------------------------------------------------------------------------
@@ -576,6 +730,9 @@ if [ -n "$DEBUG_OS_VERSION" ]; then
     [ "$DEBUG" = true ] && echo "[DEBUG] Using debug OS version: $DEBUG_OS_VERSION"
 fi
 
+# Normalized current OS version for package compatibility checks
+CURRENT_OS_VERSION_NORMALIZED=$(normalize_os_version "$os_installed_version")
+
 #-----------------------------------------------------------------------------
 # Print system information
 #-----------------------------------------------------------------------------
@@ -872,6 +1029,8 @@ fi  # End of OS_ONLY check
 #-----------------------------------------------------------------------------
 if [ "$OS_ONLY" = false ]; then
 if [ "$INFO_MODE" = true ]; then
+    pkg_header=$(printf "%-28s | %-18s | %-15s | %-17s | %-16s | %-12s | %-6s" "Package" "Source" "Installed" "Latest Compatible" "Latest Available" "Min OS Req" "Update")
+    pkg_separator=$(printf "%-28s | %-18s | %-15s | %-17s | %-16s | %-12s | %-6s" "----------------------------" "------------------" "---------------" "-----------------" "----------------" "------------" "------")
     msg=$(cat <<EOF
 
 
@@ -879,8 +1038,8 @@ if [ "$INFO_MODE" = true ]; then
 Package Update Check
 =============================================================================================================
 
-$(printf "%-30s | %-30s | %-15s | %-15s | %-6s\n" "Package" "Source" "Installed" "Latest" "Update")
-$(printf "%-30s|%-30s|%-15s|%-15s|%-6s\n" "-------------------------------" "--------------------------------" "-----------------" "-----------------" "--------")
+$pkg_header
+$pkg_separator
 EOF
 )
     if [ "$EMAIL_MODE" = false ]; then
@@ -898,16 +1057,18 @@ EOF
         fi
         HTML_OUTPUT+="<h2>${chapter_num}. Packages</h2>"
         HTML_OUTPUT+="<table style='border-collapse: collapse; width: 100%; margin-bottom: 20px;'>"
-        HTML_OUTPUT+="<tr><th style='border: 1px solid #ddd; padding: 8px; background-color: #FFA500; text-align: left; width: 31%;'>Package</th><th style='border: 1px solid #ddd; padding: 8px; background-color: #FFA500; text-align: left; width: 17%;'>Source</th><th style='border: 1px solid #ddd; padding: 8px; background-color: #FFA500; text-align: left; width: 18%;'>Installed</th><th style='border: 1px solid #ddd; padding: 8px; background-color: #FFA500; text-align: left; width: 16%;'>Latest</th><th style='border: 1px solid #ddd; padding: 8px; background-color: #FFA500; text-align: left; width: 18%;'>Update</th></tr>"
+        HTML_OUTPUT+="<tr><th style='border: 1px solid #ddd; padding: 8px; background-color: #FFA500; text-align: left; width: 19%;'>Package</th><th style='border: 1px solid #ddd; padding: 8px; background-color: #FFA500; text-align: left; width: 15%;'>Source</th><th style='border: 1px solid #ddd; padding: 8px; background-color: #FFA500; text-align: left; width: 13%;'>Installed</th><th style='border: 1px solid #ddd; padding: 8px; background-color: #FFA500; text-align: left; width: 15%;'>Latest Compatible</th><th style='border: 1px solid #ddd; padding: 8px; background-color: #FFA500; text-align: left; width: 14%;'>Latest Available</th><th style='border: 1px solid #ddd; padding: 8px; background-color: #FFA500; text-align: left; width: 12%;'>Min OS Req</th><th style='border: 1px solid #ddd; padding: 8px; background-color: #FFA500; text-align: left; width: 12%;'>Update</th></tr>"
     fi
 else
+    pkg_header=$(printf "%-28s | %-18s | %-15s | %-17s | %-16s | %-12s | %-6s" "Package" "Source" "Installed" "Latest Compatible" "Latest Available" "Min OS Req" "Update")
+    pkg_separator=$(printf "%-28s | %-18s | %-15s | %-17s | %-16s | %-12s | %-6s" "----------------------------" "------------------" "---------------" "-----------------" "----------------" "------------" "------")
     printf "\n\n\n"
     printf "Package Update Check\n"
     printf "%s\n" "============================================================================================================="
     printf "%s\n"
     # Print header for package update table
-    printf "%-30s | %-30s | %-15s | %-15s | %-6s\n" "Package" "Source" "Installed" "Latest" "Update"
-    printf "%-30s|%-30s|%-15s|%-15s|%-6s\n" "-------------------------------" "--------------------------------" "-----------------" "-----------------" "--------"
+    printf "%s\n" "$pkg_header"
+    printf "%s\n" "$pkg_separator"
 fi
 
 #-----------------------------------------------------------------------------
@@ -975,6 +1136,10 @@ for app in $(synopkg list --name | LC_ALL=C sort -f); do
 
     # Initialize variables for this package iteration
     latest_revision="$installed_revision"
+    latest_available_revision="$installed_revision"
+    latest_available_min_os_req="-"
+    latest_available_url=""
+    latest_available_found=false
     url=""
     spk=""
     update_avail="-"
@@ -1013,6 +1178,29 @@ for app in $(synopkg list --name | LC_ALL=C sort -f); do
                         # grep the name of the spk file - check both arch and platform
                         spk=$(echo "$version_html" | grep -oiE "[^/\"']*BSM[^/\"']*(${package_arch}|${platform_name})[^\"']*\.spk" | head -1)
                         url=$(echo "$version_html" | grep -oE "href=\"[^\"']*/download/Package/spk/[^\"']*BSM[^\"']*(${package_arch}|${platform_name})[^\"']*\.spk\"" | head -1 | sed 's|href=\"||;s|\"||')
+
+                        # If URL is found, prepend domain if relative
+                        if [ -n "$url" ] && [[ "$url" =~ ^/ ]]; then
+                            url="https://archive.synology.com${url}"
+                        fi
+
+                        if ! is_spk_compatible_with_os "$url"; then
+                            if [ "$latest_available_found" = false ]; then
+                                latest_available_found=true
+                                latest_available_revision="$version"
+                                latest_available_min_os_req="${LAST_SPK_MIN_OS_VERSION:--}"
+                                latest_available_url="$url"
+                            fi
+                            [ "$DEBUG" = true ] && echo "[DEBUG] Skipping incompatible BSM package for $app: $url"
+                            continue
+                        fi
+
+                        if [ "$latest_available_found" = false ]; then
+                            latest_available_found=true
+                            latest_available_revision="$version"
+                            latest_available_min_os_req="${LAST_SPK_MIN_OS_VERSION:--}"
+                            latest_available_url="$url"
+                        fi
                         download_apps+=("$app")
                         downlaod_revisions+=("$latest_revision")
                         download_links+=("$url")
@@ -1034,6 +1222,23 @@ for app in $(synopkg list --name | LC_ALL=C sort -f); do
                             url="https://archive.synology.com${url}"
                         fi
 
+                        if ! is_spk_compatible_with_os "$url"; then
+                            if [ "$latest_available_found" = false ]; then
+                                latest_available_found=true
+                                latest_available_revision="$version"
+                                latest_available_min_os_req="${LAST_SPK_MIN_OS_VERSION:--}"
+                                latest_available_url="$url"
+                            fi
+                            [ "$DEBUG" = true ] && echo "[DEBUG] Skipping incompatible DSM package for $app: $url"
+                            continue
+                        fi
+
+                        if [ "$latest_available_found" = false ]; then
+                            latest_available_found=true
+                            latest_available_revision="$version"
+                            latest_available_min_os_req="${LAST_SPK_MIN_OS_VERSION:--}"
+                            latest_available_url="$url"
+                        fi
                         download_apps+=("$app")
                         downlaod_revisions+=("$latest_revision")
                         download_links+=("$url")
@@ -1123,6 +1328,23 @@ for app in $(synopkg list --name | LC_ALL=C sort -f); do
                                         # URL decode the filename
                                         spk=$(echo "$spk" | sed 's/%5B/[/g; s/%5D/]/g')
 
+                                        if ! is_spk_compatible_with_os "$spk_url"; then
+                                            if [ "$latest_available_found" = false ]; then
+                                                latest_available_found=true
+                                                latest_available_revision="$version"
+                                                latest_available_min_os_req="${LAST_SPK_MIN_OS_VERSION:--}"
+                                                latest_available_url="$spk_url"
+                                            fi
+                                            [ "$DEBUG" = true ] && echo "[DEBUG] Skipping incompatible SynoCommunity package for $app: $spk_url"
+                                            continue
+                                        fi
+
+                                        if [ "$latest_available_found" = false ]; then
+                                            latest_available_found=true
+                                            latest_available_revision="$version"
+                                            latest_available_min_os_req="${LAST_SPK_MIN_OS_VERSION:--}"
+                                            latest_available_url="$spk_url"
+                                        fi
                                         [ "$DEBUG" = true ] && echo "[DEBUG] Found download URL: $spk_url"
                                         [ "$DEBUG" = true ] && echo "[DEBUG] SPK filename: $spk"
 
@@ -1181,6 +1403,24 @@ for app in $(synopkg list --name | LC_ALL=C sort -f); do
 
                                     if [ -n "$spk_url" ]; then
                                         spk=$(basename "$spk_url")
+
+                                        if ! is_spk_compatible_with_os "$spk_url"; then
+                                            if [ "$latest_available_found" = false ]; then
+                                                latest_available_found=true
+                                                latest_available_revision="$github_version"
+                                                latest_available_min_os_req="${LAST_SPK_MIN_OS_VERSION:--}"
+                                                latest_available_url="$spk_url"
+                                            fi
+                                            [ "$DEBUG" = true ] && echo "[DEBUG] Skipping incompatible GitHub package for $app: $spk_url"
+                                            continue
+                                        fi
+
+                                        if [ "$latest_available_found" = false ]; then
+                                            latest_available_found=true
+                                            latest_available_revision="$github_version"
+                                            latest_available_min_os_req="${LAST_SPK_MIN_OS_VERSION:--}"
+                                            latest_available_url="$spk_url"
+                                        fi
                                         [ "$DEBUG" = true ] && echo "[DEBUG] Found GitHub SPK: $spk (URL: $spk_url)"
                                         latest_revision="$github_version"
                                         url="$spk_url"
@@ -1191,7 +1431,7 @@ for app in $(synopkg list --name | LC_ALL=C sort -f); do
                                         found="yes"
                                     else
                                         [ "$DEBUG" = true ] && echo "[DEBUG] No .spk asset found for arch=$package_arch or platform=$platform_name"
-                                        latest_revision="$github_version"
+                                        latest_available_revision="$github_version"
                                     fi
                                 else
                                     [ "$DEBUG" = true ] && echo "[DEBUG] No newer GitHub version found (installed: $installed_revision, latest: $github_version)"
@@ -1217,7 +1457,7 @@ for app in $(synopkg list --name | LC_ALL=C sort -f); do
         fi
     fi
     if [ "$INFO_MODE" = true ]; then
-        msg=$(printf "%-30s | %-30s | %-15s | %-15s | %-6s\n" "$app" "$pkg_source_display" "$installed_revision" "$latest_revision" "$update_avail")
+        msg=$(printf "%-28.28s | %-18.18s | %-15.15s | %-17.17s | %-16.16s | %-12.12s | %-6.6s\n" "$app" "$pkg_source_display" "$installed_revision" "$latest_revision" "$latest_available_revision" "$latest_available_min_os_req" "$update_avail")
         if [ "$EMAIL_MODE" = false ]; then
             printf "%s\n" "$msg"
         fi
@@ -1228,7 +1468,7 @@ for app in $(synopkg list --name | LC_ALL=C sort -f); do
             # Convert update status to icon for HTML
             if [ "$update_avail" = "X" ]; then
                 update_icon="<span style='font-size: 14px;'>🔴</span>"
-                # Make latest version clickable if download URL is available
+                # Make latest compatible version clickable if download URL is available
                 if [ -n "$url" ]; then
                     latest_revision_display="<a href='$url' style='color: #0066cc; text-decoration: none;'>$latest_revision</a>"
                 else
@@ -1237,6 +1477,12 @@ for app in $(synopkg list --name | LC_ALL=C sort -f); do
             else
                 update_icon="<span style='font-size: 14px; color: #51CF66;'>🟢</span>"
                 latest_revision_display="$latest_revision"
+            fi
+
+            if [ -n "$latest_available_url" ]; then
+                latest_available_display="<a href='$latest_available_url' style='color: #0066cc; text-decoration: none;'>$latest_available_revision</a>"
+            else
+                latest_available_display="$latest_available_revision"
             fi
 
             # Add visual indicator for package source
@@ -1251,7 +1497,7 @@ for app in $(synopkg list --name | LC_ALL=C sort -f); do
                 source_display="<span style='background-color: #9B59B6; color: white; padding: 2px 6px; border-radius: 3px; font-size: 11px; font-weight: bold;'>👥 COMMUNITY</span><br><span style='font-size: 10px; color: #666;'>$pkg_distributor</span>"
             fi
 
-            HTML_OUTPUT+="<tr><td style='border: 1px solid #ddd; padding: 4px;'>$app</td><td style='border: 1px solid #ddd; padding: 4px;'>$source_display</td><td style='border: 1px solid #ddd; padding: 4px;'>$installed_revision</td><td style='border: 1px solid #ddd; padding: 4px;'>$latest_revision_display</td><td style='border: 1px solid #ddd; padding: 4px; text-align: center;'>$update_icon</td></tr>"
+            HTML_OUTPUT+="<tr><td style='border: 1px solid #ddd; padding: 4px;'>$app</td><td style='border: 1px solid #ddd; padding: 4px;'>$source_display</td><td style='border: 1px solid #ddd; padding: 4px;'>$installed_revision</td><td style='border: 1px solid #ddd; padding: 4px;'>$latest_revision_display</td><td style='border: 1px solid #ddd; padding: 4px;'>$latest_available_display</td><td style='border: 1px solid #ddd; padding: 4px;'>$latest_available_min_os_req</td><td style='border: 1px solid #ddd; padding: 4px; text-align: center;'>$update_icon</td></tr>"
         fi
 
         # Add download link right after the table if update is available
@@ -1263,7 +1509,7 @@ for app in $(synopkg list --name | LC_ALL=C sort -f); do
             INFO_OUTPUT+="$msg"
         fi
     else
-        printf "%-30s | %-30s | %-15s | %-15s | %-6s\n" "$app" "$pkg_source_display" "$installed_revision" "$latest_revision" "$update_avail"
+        printf "%-28.28s | %-18.18s | %-15.15s | %-17.17s | %-16.16s | %-12.12s | %-6.6s\n" "$app" "$pkg_source_display" "$installed_revision" "$latest_revision" "$latest_available_revision" "$latest_available_min_os_req" "$update_avail"
 
         # Add download link right after the table if update is available
         if [ "$update_avail" = "X" ] && [ -n "$download_link" ]; then

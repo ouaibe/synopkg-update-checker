@@ -13,6 +13,7 @@ Das Skript unterstützt aktuell:
   - offizielle Synology-Pakete
   - SynoCommunity-Pakete
   - GitHub-Releases, wenn der Paket-Distributor auf GitHub verweist
+- kompatibilitätsbasierte Paketbewertung anhand von SPK-Metadaten (`os_min_ver` / `firmware`)
 - interaktive Installation mit bedarfsgesteuertem Download erst nach Bestätigung
 - optionalen HTML-E-Mail-Bericht mit klickbaren Links und Quell-Badges
 - Filter für laufende Pakete, offizielle Pakete, Community-Pakete sowie reine OS- oder Paketprüfungen
@@ -42,6 +43,8 @@ Das Skript unterstützt aktuell:
 Optionen:
   -i, --info          Nur System- und Update-Informationen anzeigen
   -e, --email         Bericht per E-Mail senden und automatisch den Info-Modus aktivieren
+  --email-updates-only
+                      Im E-Mail-Modus nur senden, wenn mindestens ein Update verfügbar ist
   --email-to <email>  Konfigurierten DSM-Empfänger überschreiben
   -r, --running       Nur aktuell laufende Pakete prüfen
   --official-only     Nur offizielle Synology-Pakete anzeigen
@@ -60,6 +63,7 @@ Optionen:
 | --- | --- |
 | `-i`, `--info` | Zeigt nur den Bericht an. Keine Downloads und kein Installationsmenü. |
 | `-e`, `--email` | Sendet den Bericht als HTML-E-Mail und aktiviert automatisch den Info-Modus. Es gibt dabei keine normale stdout-Ausgabe. |
+| `--email-updates-only` | In Kombination mit `--email` wird nur dann ein Bericht gesendet, wenn mindestens ein OS- oder Paket-Update verfügbar ist. |
 | `--email-to <email>` | Verwendet einen benutzerdefinierten Empfänger statt der DSM-Konfiguration. |
 | `-r`, `--running` | Begrenzt die Paketprüfung auf aktuell laufende Dienste. |
 | `--official-only` | Zeigt nur offizielle Synology-Pakete. |
@@ -85,6 +89,31 @@ Die Paketquelle wird aus den Metadaten in `/var/packages/<paket>/INFO` ermittelt
   - SynoCommunity-Seiten werden direkt berücksichtigt, wenn passend
 
 Für Paketdownloads verwendet das Skript jetzt den paket-spezifischen `arch`-Wert aus der INFO-Datei und zusätzlich den Plattformnamen des Systems, um das passendste SPK zu finden.
+
+Für die Kompatibilitätsentscheidung wertet das Skript zusätzlich SPK-Metadaten (`os_min_ver`, alternativ `firmware`) aus und vergleicht sie mit der aktuell installierten DSM- bzw. BSM-Version.
+
+## Bedeutung der Paket-Tabelle
+
+Der Paketbereich zeigt sowohl den installierbaren als auch den nur upstream verfügbaren Stand:
+
+- **Installed**: aktuell installierte Paketversion
+- **Latest Compatible**: neueste Paketversion, die mit dem aktuellen OS kompatibel ist
+- **Latest Available**: neueste im jeweiligen Paket-Repository gefundene Version
+- **Min OS Req**: erforderliche Mindest-OS-Version der **Latest Available**-Version (sofern in den SPK-Metadaten enthalten)
+- **Update**:
+  - `X`, wenn `Latest Compatible` neuer als `Installed` ist
+  - `-`, wenn aktuell kein kompatibles Update installierbar ist
+
+Damit ist klar erkennbar, wenn eine neuere Upstream-Version existiert, aber eine neuere DSM- oder BSM-Version voraussetzt.
+
+Beispiel:
+
+```text
+Package      | Installed   | Latest Compatible | Latest Available | Min OS Req   | Update
+FileStation  | 1.4.3-1610  | 1.4.3-1610        | 1.5.1-2410       | 7.4-101141   | -
+```
+
+Bedeutung: Es gibt eine neuere Upstream-Version, sie ist auf der aktuellen DSM-/BSM-Version aber noch nicht installierbar.
 
 ## E-Mail-Bericht
 
@@ -121,7 +150,8 @@ In der Terminalausgabe bleibt die Spalte **Update** bewusst schlicht:
    - installierte Pakete stabil alphabetisch auflisten
    - Paketquelle erkennen
    - aktive Filter wie running-only oder official-only anwenden
-   - installierte und neueste Version vergleichen
+  - neueste verfügbare und neueste kompatible Version bestimmen
+  - Kandidaten-SPKs gegen die aktuellen OS-Anforderungen (`os_min_ver` / `firmware`) prüfen
    - passende Download-URLs für aktualisierbare Pakete sammeln
 
 4. Im normalen Modus:
