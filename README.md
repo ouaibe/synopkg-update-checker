@@ -42,11 +42,11 @@ This script currently supports:
 ```text
 Options:
   -i, --info          Display system and update information only
-  --info-fail-on-updates
-                      With --info, exit 1 when updates are found, otherwise exit 0
+  --info-fail-on-updates Exit 1 when selected checks find updates, otherwise exit 0
+                      (works only with --info)
   -e, --email         Send the report by email and automatically enable info mode
-  --email-updates-only
-                      In email mode, send a report only when at least one update is available
+  --email-updates-only Send a report only when at least one update is available
+                      (works only with --email)
   --email-to <email>  Override the configured DSM recipient address
   -r, --running       Check updates only for currently running packages
   --official-only     Show only official Synology packages

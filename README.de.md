@@ -42,11 +42,11 @@ Das Skript unterstützt aktuell:
 ```text
 Optionen:
   -i, --info          Nur System- und Update-Informationen anzeigen
-  --info-fail-on-updates
-                      Mit --info Exit-Code 1, wenn Updates gefunden werden, sonst 0
+  --info-fail-on-updates Exit-Code 1, wenn Updates gefunden werden, sonst 0
+                      (nur zusammen mit --info)
   -e, --email         Bericht per E-Mail senden und automatisch den Info-Modus aktivieren
-  --email-updates-only
-                      Im E-Mail-Modus nur senden, wenn mindestens ein Update verfügbar ist
+  --email-updates-only Nur senden, wenn mindestens ein Update verfügbar ist
+                      (nur zusammen mit --email)
   --email-to <email>  Konfigurierten DSM-Empfänger überschreiben
   -r, --running       Nur aktuell laufende Pakete prüfen
   --official-only     Nur offizielle Synology-Pakete anzeigen
