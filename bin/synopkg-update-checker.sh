@@ -37,9 +37,8 @@ usage() {
     Options:
         -i, --info          Display system and update information only,
                             like dry-run but without download messages and interactive installation
-        --info-fail-on-updates
-                            With --info, exit 1 when selected checks find updates,
-                            otherwise exit 0
+        --info-fail-on-updates Exit 1 when selected checks find updates, otherwise exit 0
+                    (works only with --info)
         -e, --email         Email mode - no output to stdout, only capture to variable (requires --info)
         --email-updates-only Send email only when at least one update is available
                     (works only with --email)
