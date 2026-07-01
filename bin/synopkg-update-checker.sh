@@ -146,6 +146,7 @@ is_allowed_package_download_url() {
     local url="$1"
 
     is_url_from_host "$url" "archive.synology.com" ||
+        is_url_from_host "$url" "global.synologydownload.com" ||
         is_url_from_host "$url" "packages.synocommunity.com" ||
         is_url_from_host "$url" "github.com"
 }
@@ -157,7 +158,8 @@ normalize_synology_archive_url() {
         url="https://archive.synology.com${url}"
     fi
 
-    if is_url_from_host "$url" "archive.synology.com"; then
+    if is_url_from_host "$url" "archive.synology.com" ||
+       is_url_from_host "$url" "global.synologydownload.com"; then
         printf '%s' "$url"
         return 0
     fi
