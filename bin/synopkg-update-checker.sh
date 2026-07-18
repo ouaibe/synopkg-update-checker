@@ -131,6 +131,18 @@ normalize_os_version() {
         return
     fi
 
+    # Some SPKs declare min OS as major.minor-build (e.g. 7.4-101141).
+    if [[ "$version" =~ ^([0-9]+)\.([0-9]+)-([0-9]+)$ ]]; then
+        echo "${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.0-${BASH_REMATCH[3]}-0"
+        return
+    fi
+
+    # Rare fallback for plain major.minor values.
+    if [[ "$version" =~ ^([0-9]+)\.([0-9]+)$ ]]; then
+        echo "${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.0-0-0"
+        return
+    fi
+
     echo "$version"
 }
 
@@ -259,11 +271,11 @@ is_spk_compatible_with_os() {
     required_os_version_normalized=$(normalize_os_version "$min_os_version")
 
     if is_version_gte "$CURRENT_OS_VERSION_NORMALIZED" "$required_os_version_normalized"; then
-        [ "$DEBUG" = true ] && echo "[DEBUG] SPK compatible (required: $min_os_version, current: $os_display_version): $spk_url"
+        [ "$DEBUG" = true ] && echo "[DEBUG] SPK compatible (required: $min_os_version -> $required_os_version_normalized, current: $os_display_version -> $CURRENT_OS_VERSION_NORMALIZED): $spk_url"
         return 0
     fi
 
-    [ "$DEBUG" = true ] && echo "[DEBUG] SPK NOT compatible (required: $min_os_version, current: $os_display_version): $spk_url"
+    [ "$DEBUG" = true ] && echo "[DEBUG] SPK NOT compatible (required: $min_os_version -> $required_os_version_normalized, current: $os_display_version -> $CURRENT_OS_VERSION_NORMALIZED): $spk_url"
     return 1
 }
 
