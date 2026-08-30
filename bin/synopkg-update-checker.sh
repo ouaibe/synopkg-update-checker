@@ -66,11 +66,14 @@ EOF
 #-----------------------------------------------------------------------------
 html_escape() {
     local escaped="$1"
-    escaped=${escaped//&/&amp;}
-    escaped=${escaped//</&lt;}
-    escaped=${escaped//>/&gt;}
-    escaped=${escaped//\"/&quot;}
-    escaped=${escaped//\'/&#39;}
+    # The replacements MUST stay quoted: since bash 5.1 an unquoted '&' in the
+    # replacement of ${var//pat/repl} expands to the matched text, which would
+    # turn '<' into '<lt;' instead of '&lt;' and silently disable escaping.
+    escaped=${escaped//'&'/'&amp;'}
+    escaped=${escaped//'<'/'&lt;'}
+    escaped=${escaped//'>'/'&gt;'}
+    escaped=${escaped//'"'/'&quot;'}
+    escaped=${escaped//"'"/'&#39;'}
     printf '%s' "$escaped"
 }
 
@@ -99,6 +102,36 @@ contains_token_ci() {
         token_lc=$(lower_string "$token")
         case "$haystack" in
             *"$token_lc"*) return 0 ;;
+        esac
+    done
+
+    return 1
+}
+
+#-----------------------------------------------------------------------------
+# Function contains_delimited_token_ci()
+# Like contains_token_ci(), but the token must be delimited by a non
+# alphanumeric character (or a string boundary). Used for the generic
+# architecture markers, where a plain substring match is far too loose:
+# "all" would otherwise match "installer", "metallb" or "wallpaper" and could
+# select an SPK built for a different architecture.
+#-----------------------------------------------------------------------------
+contains_delimited_token_ci() {
+    local haystack
+    local token
+    local token_lc
+
+    haystack=$(lower_string "$1")
+    shift
+
+    for token in "$@"; do
+        [ -n "$token" ] || continue
+        token_lc=$(lower_string "$token")
+        case "$haystack" in
+            "$token_lc") return 0 ;;
+            "$token_lc"[!a-z0-9]*) return 0 ;;
+            *[!a-z0-9]"$token_lc") return 0 ;;
+            *[!a-z0-9]"$token_lc"[!a-z0-9]*) return 0 ;;
         esac
     done
 
@@ -220,7 +253,13 @@ wget_download() {
 spk_matches_current_system() {
     local spk_name="$1"
 
-    contains_token_ci "$spk_name" "$package_arch" "$platform_name" "$arch" "noarch" "universal" "all"
+    # The concrete architecture/platform markers are embedded in the file name
+    # (e.g. "app-x86_64-1.0.spk"), so a substring match is what we want there.
+    contains_token_ci "$spk_name" "$package_arch" "$platform_name" "$arch" && return 0
+
+    # The generic "any architecture" markers need a delimited match so they
+    # cannot latch onto an unrelated word in the file name.
+    contains_delimited_token_ci "$spk_name" "noarch" "universal" "all"
 }
 
 #-----------------------------------------------------------------------------
@@ -318,8 +357,10 @@ normalize_os_version() {
     fi
 
     # Some SPKs declare min OS as major.minor-build (e.g. 7.4-101141).
+    # Keep this format intact so compatibility checks can compare build gates
+    # directly against the currently installed build number.
     if [[ "$version" =~ ^([0-9]+)\.([0-9]+)-([0-9]+)$ ]]; then
-        echo "${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.0-${BASH_REMATCH[3]}-0"
+        echo "$version"
         return
     fi
 
@@ -334,15 +375,133 @@ normalize_os_version() {
 
 #-----------------------------------------------------------------------------
 # Function is_version_gte()
-# Compare two normalized versions. Returns 0 if current >= required.
+# Compare current OS version against a required version.
+# Supports both full versions (x.y.z-build[-smallfix]) and build-gated
+# requirements (x.y-build).
+# Returns 0 if current >= required.
 #-----------------------------------------------------------------------------
 is_version_gte() {
     local current_version="$1"
     local required_version="$2"
-    local oldest
+    local required_major=""
+    local required_minor=""
+    local required_build=""
+    local current_major=""
+    local current_minor=""
+    local current_micro=""
+    local current_build=""
+    local current_smallfix="0"
+    local required_micro=""
+    local required_smallfix="0"
 
-    oldest=$(printf '%s\n%s\n' "$required_version" "$current_version" | sort -V | head -1)
-    [ "$oldest" = "$required_version" ]
+    # Build-gated requirement used by some SPKs (e.g. 7.4-101141).
+    if [[ "$required_version" =~ ^([0-9]+)\.([0-9]+)-([0-9]+)$ ]]; then
+        required_major="${BASH_REMATCH[1]}"
+        required_minor="${BASH_REMATCH[2]}"
+        required_build="${BASH_REMATCH[3]}"
+
+        if [[ "$current_version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)-([0-9]+)-([0-9]+)$ ]]; then
+            current_major="${BASH_REMATCH[1]}"
+            current_minor="${BASH_REMATCH[2]}"
+            current_build="${BASH_REMATCH[4]}"
+        elif [[ "$current_version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)-([0-9]+)$ ]]; then
+            current_major="${BASH_REMATCH[1]}"
+            current_minor="${BASH_REMATCH[2]}"
+            current_build="${BASH_REMATCH[4]}"
+        else
+            return 1
+        fi
+
+        if [ "$current_major" -gt "$required_major" ]; then
+            return 0
+        fi
+        if [ "$current_major" -lt "$required_major" ]; then
+            return 1
+        fi
+
+        if [ "$current_minor" -gt "$required_minor" ]; then
+            return 0
+        fi
+        if [ "$current_minor" -lt "$required_minor" ]; then
+            return 1
+        fi
+
+        if [ "$current_build" -ge "$required_build" ]; then
+            return 0
+        fi
+        return 1
+    fi
+
+    # Full semantic compare: major, minor, micro, build, smallfix.
+    if [[ "$required_version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)-([0-9]+)-([0-9]+)$ ]]; then
+        required_major="${BASH_REMATCH[1]}"
+        required_minor="${BASH_REMATCH[2]}"
+        required_micro="${BASH_REMATCH[3]}"
+        required_build="${BASH_REMATCH[4]}"
+        required_smallfix="${BASH_REMATCH[5]}"
+    elif [[ "$required_version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)-([0-9]+)$ ]]; then
+        required_major="${BASH_REMATCH[1]}"
+        required_minor="${BASH_REMATCH[2]}"
+        required_micro="${BASH_REMATCH[3]}"
+        required_build="${BASH_REMATCH[4]}"
+        required_smallfix="0"
+    else
+        # Fallback for unknown formats.
+        local oldest
+        oldest=$(printf '%s\n%s\n' "$required_version" "$current_version" | sort -V | head -1)
+        [ "$oldest" = "$required_version" ]
+        return
+    fi
+
+    if [[ "$current_version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)-([0-9]+)-([0-9]+)$ ]]; then
+        current_major="${BASH_REMATCH[1]}"
+        current_minor="${BASH_REMATCH[2]}"
+        current_micro="${BASH_REMATCH[3]}"
+        current_build="${BASH_REMATCH[4]}"
+        current_smallfix="${BASH_REMATCH[5]}"
+    elif [[ "$current_version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)-([0-9]+)$ ]]; then
+        current_major="${BASH_REMATCH[1]}"
+        current_minor="${BASH_REMATCH[2]}"
+        current_micro="${BASH_REMATCH[3]}"
+        current_build="${BASH_REMATCH[4]}"
+        current_smallfix="0"
+    else
+        return 1
+    fi
+
+    if [ "$current_major" -gt "$required_major" ]; then
+        return 0
+    fi
+    if [ "$current_major" -lt "$required_major" ]; then
+        return 1
+    fi
+
+    if [ "$current_minor" -gt "$required_minor" ]; then
+        return 0
+    fi
+    if [ "$current_minor" -lt "$required_minor" ]; then
+        return 1
+    fi
+
+    if [ "$current_micro" -gt "$required_micro" ]; then
+        return 0
+    fi
+    if [ "$current_micro" -lt "$required_micro" ]; then
+        return 1
+    fi
+
+    if [ "$current_build" -gt "$required_build" ]; then
+        return 0
+    fi
+    if [ "$current_build" -lt "$required_build" ]; then
+        return 1
+    fi
+
+    if [ "$current_smallfix" -ge "$required_smallfix" ]; then
+        return 0
+    fi
+
+    return 1
 }
 
 #-----------------------------------------------------------------------------
@@ -486,7 +645,9 @@ convert_urls_to_html_links() {
         # URL decode the filename (e.g., %2B -> +)
         decoded_filename=$(echo "$filename" | sed 's/%2B/+/g; s/%20/ /g; s/%2F/\//g')
         replacement="Download Link: <a href='$(html_attr_escape "$url")' style='color: #0066cc; text-decoration: none;'>$(html_escape "${os_name}_${os_latest}_${decoded_filename}")</a>"
-        result="${result//${full_match}/${replacement}}"
+        # Both sides stay quoted: unquoted the pattern would be treated as a
+        # glob, and an '&' in the replacement would expand to the match.
+        result="${result//"$full_match"/"$replacement"}"
     done
 
     # Convert package download links in table format
@@ -888,6 +1049,24 @@ if [ "$OS_ONLY" = true ] && [ "$PACKAGES_ONLY" = true ]; then
     exit 1
 fi
 
+#-----------------------------------------------------------------------------
+# Validate email option combinations
+#-----------------------------------------------------------------------------
+if [ "$EMAIL_MODE" = false ] && [ "$EMAIL_UPDATES_ONLY" = true ]; then
+    echo "Error: --email-updates-only requires --email"
+    usage
+    exit 1
+fi
+
+if [ "$EMAIL_MODE" = false ] && [ -n "$EMAIL_TO" ]; then
+    echo "Error: --email-to requires --email"
+    usage
+    exit 1
+fi
+
+#-----------------------------------------------------------------------------
+# Validate info option combinations
+#-----------------------------------------------------------------------------
 if [ "$INFO_FAIL_ON_UPDATES" = true ] && [ "$INFO_MODE" != true ]; then
     echo "Error: --info-fail-on-updates requires --info"
     usage
@@ -923,6 +1102,8 @@ cleanup_work_dir() {
 }
 trap cleanup_work_dir EXIT
 
+# mktemp -d already yields an absolute, canonical path, so no realpath
+# normalization of ".." segments is needed here.
 download_dir="$work_dir/downloads"
 # Debug artifacts are meant to survive after this run (work_dir is removed on
 # EXIT), so they live outside work_dir. Create them with mktemp -d at use time
@@ -1589,19 +1770,19 @@ for app in $(synopkg list --name | LC_ALL=C sort -f); do
                                     # First try with platform_name (e.g., kvmx64)
                                     if [ -n "$firmware_code" ]; then
                                         spk_url=$(echo "$synocommunity_pkg_html" | grep -oP 'href="\Khttps://packages\.synocommunity\.com[^"]*\.spk' | \
-                                                  grep "$firmware_code" | grep -iE "\[$platform_name_escaped\]|$platform_name_escaped-|$platform_name_escaped\]" | head -1)
+                                                  grep -F -e "$firmware_code" | grep -iE -e "\[$platform_name_escaped\]|$platform_name_escaped-|$platform_name_escaped\]" | head -1)
                                     fi
 
                                     if [ -z "$spk_url" ] && [ -n "$firmware_code" ]; then
                                         # Try with architecture if platform_name didn't work (e.g., x86_64)
                                         spk_url=$(echo "$synocommunity_pkg_html" | grep -oP 'href="\Khttps://packages\.synocommunity\.com[^"]*\.spk' | \
-                                                  grep "$firmware_code" | grep -iE "\[$arch_escaped\]|$arch_escaped-|$arch_escaped\]" | head -1)
+                                                  grep -F -e "$firmware_code" | grep -iE -e "\[$arch_escaped\]|$arch_escaped-|$arch_escaped\]" | head -1)
                                     fi
 
                                     if [ -z "$spk_url" ]; then
                                         # Fallback: try without firmware code filter (just platform/arch)
                                         spk_url=$(echo "$synocommunity_pkg_html" | grep -oP 'href="\Khttps://packages\.synocommunity\.com[^"]*\.spk' | \
-                                                  grep -iF "$platform_name" | head -1)
+                                                  grep -iF -e "$platform_name" | head -1)
                                     fi
 
                                     if [ -n "$spk_url" ]; then
@@ -1664,7 +1845,12 @@ for app in $(synopkg list --name | LC_ALL=C sort -f); do
                         [ "$DEBUG" = true ] && echo "[DEBUG] GitHub owner: $github_owner, repo: $github_repo"
 
                         if [ -n "$github_owner" ] && [ -n "$github_repo" ]; then
-                            if [[ ! "$github_owner" =~ ^[A-Za-z0-9_.-]+$ || ! "$github_repo" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+                            # Owner/repo are pasted into an api.github.com path,
+                            # so they must be plain path segments. Reject "."
+                            # and ".." (curl resolves them and would rewrite the
+                            # request path) as well as leading "-" or ".".
+                            if [[ ! "$github_owner" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ||
+                                  ! "$github_repo" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]]; then
                                 [ "$DEBUG" = true ] && echo "[DEBUG] Rejected unsafe GitHub owner/repo from: $pkg_distributor"
                                 continue
                             fi
@@ -1791,27 +1977,23 @@ for app in $(synopkg list --name | LC_ALL=C sort -f); do
                 latest_available_display="$latest_available_revision_html"
             fi
 
-            # Add visual indicator for package source
+            # Add visual indicator for package source.
+            # The distributor string comes from a package INFO file, so it is
+            # escaped before it reaches the HTML, and it is only turned into a
+            # link when it really is an https://github.com/ URL.
             if is_official_package "$app"; then
                 # Official package - blue badge with source name
-                source_display="<span style='background-color: #1E90FF; color: white; padding: 2px 6px; border-radius: 3px; font-size: 11px; font-weight: bold;'>🏢 OFFICIAL</span><br><span style='font-size: 10px; color: #666;'>$pkg_distributor</span>"
-            elif echo "$pkg_distributor" | grep -qi "github\.com"; then
+                source_display="<span style='background-color: #1E90FF; color: white; padding: 2px 6px; border-radius: 3px; font-size: 11px; font-weight: bold;'>🏢 OFFICIAL</span><br><span style='font-size: 10px; color: #666;'>$pkg_distributor_html</span>"
+            elif is_url_from_host "$pkg_distributor" "github.com"; then
                 # GitHub package - muted golden badge
-                source_display="<span style='background-color: #B8860B; color: white; padding: 2px 6px; border-radius: 3px; font-size: 11px; font-weight: bold;'>🐙 GITHUB</span><br><span style='font-size: 10px; color: #666;'><a href='$pkg_distributor' style='color: #0066cc; text-decoration: none;'>GitHub.com</a></span>"
+                source_display="<span style='background-color: #B8860B; color: white; padding: 2px 6px; border-radius: 3px; font-size: 11px; font-weight: bold;'>🐙 GITHUB</span><br><span style='font-size: 10px; color: #666;'><a href='$(html_attr_escape "$pkg_distributor")' style='color: #0066cc; text-decoration: none;'>GitHub.com</a></span>"
+            elif echo "$pkg_distributor" | grep -qi "github\.com"; then
+                # Looks like GitHub, but not a plain https://github.com/ URL:
+                # keep the badge, show the distributor as inert escaped text.
+                source_display="<span style='background-color: #B8860B; color: white; padding: 2px 6px; border-radius: 3px; font-size: 11px; font-weight: bold;'>🐙 GITHUB</span><br><span style='font-size: 10px; color: #666;'>$pkg_distributor_html</span>"
             else
                 # Community package - purple badge with source name
-                source_display="<span style='background-color: #9B59B6; color: white; padding: 2px 6px; border-radius: 3px; font-size: 11px; font-weight: bold;'>👥 COMMUNITY</span><br><span style='font-size: 10px; color: #666;'>$pkg_distributor</span>"
-            fi
-
-            # Rebuild source display with escaped metadata before emitting HTML.
-            if is_official_package "$app"; then
-                source_display="<span style='background-color: #1E90FF; color: white; padding: 2px 6px; border-radius: 3px; font-size: 11px; font-weight: bold;'>OFFICIAL</span><br><span style='font-size: 10px; color: #666;'>$pkg_distributor_html</span>"
-            elif is_url_from_host "$pkg_distributor" "github.com"; then
-                source_display="<span style='background-color: #B8860B; color: white; padding: 2px 6px; border-radius: 3px; font-size: 11px; font-weight: bold;'>GITHUB</span><br><span style='font-size: 10px; color: #666;'><a href='$(html_attr_escape "$pkg_distributor")' style='color: #0066cc; text-decoration: none;'>GitHub.com</a></span>"
-            elif echo "$pkg_distributor" | grep -qi "github\.com"; then
-                source_display="<span style='background-color: #B8860B; color: white; padding: 2px 6px; border-radius: 3px; font-size: 11px; font-weight: bold;'>GITHUB</span><br><span style='font-size: 10px; color: #666;'>$pkg_distributor_html</span>"
-            else
-                source_display="<span style='background-color: #9B59B6; color: white; padding: 2px 6px; border-radius: 3px; font-size: 11px; font-weight: bold;'>COMMUNITY</span><br><span style='font-size: 10px; color: #666;'>$pkg_distributor_html</span>"
+                source_display="<span style='background-color: #9B59B6; color: white; padding: 2px 6px; border-radius: 3px; font-size: 11px; font-weight: bold;'>👥 COMMUNITY</span><br><span style='font-size: 10px; color: #666;'>$pkg_distributor_html</span>"
             fi
 
             HTML_OUTPUT+="<tr><td style='border: 1px solid #ddd; padding: 4px;'>$app_html</td><td style='border: 1px solid #ddd; padding: 4px;'>$source_display</td><td style='border: 1px solid #ddd; padding: 4px;'>$installed_revision_html</td><td style='border: 1px solid #ddd; padding: 4px;'>$latest_revision_display</td><td style='border: 1px solid #ddd; padding: 4px;'>$latest_available_display</td><td style='border: 1px solid #ddd; padding: 4px;'>$latest_available_min_os_req_html</td><td style='border: 1px solid #ddd; padding: 4px; text-align: center;'>$update_icon</td></tr>"
@@ -1984,6 +2166,8 @@ fi  # End of PACKAGES_ONLY check
 
 # Exit if in info mode
 if [ "$INFO_MODE" = true ]; then
+    # Determine whether the checks that actually ran found any update, so
+    # --info-fail-on-updates can turn that into a non-zero exit code.
     info_updates_found=false
     if [ "$PACKAGES_ONLY" != true ] && [ "$os_update_avail" = true ]; then
         info_updates_found=true
@@ -1996,6 +2180,7 @@ if [ "$INFO_MODE" = true ]; then
     if [ "$EMAIL_MODE" = false ]; then
         printf "\n"
     fi
+
     # Send email if EMAIL_MODE is enabled
     if [ "$EMAIL_MODE" = true ]; then
         if [ "$EMAIL_UPDATES_ONLY" = true ]; then
@@ -2153,6 +2338,40 @@ download_package_file() {
     return 0
 }
 
+# Install a package, automatically starting/retrying once when synopkg reports
+# dependent packages are not ready (error code 268) so a fixable dependency
+# issue doesn't silently leave the package outdated on every subsequent run.
+# Sets globals: INSTALL_OUTPUT, INSTALL_ERROR_CODE, INSTALL_SUCCESS
+install_package_with_retry() {
+    local file="$1"
+
+    INSTALL_OUTPUT=$(synopkg install "$file" 2>/dev/null)
+    INSTALL_ERROR_CODE=$(echo "$INSTALL_OUTPUT" | jq -r '.error.code')
+    INSTALL_SUCCESS=$(echo "$INSTALL_OUTPUT" | jq -r '.success')
+
+    if [ "$INSTALL_SUCCESS" = "true" ] && [ "$INSTALL_ERROR_CODE" = "0" ]; then
+        return 0
+    fi
+
+    local dep_code dep_pkgs dep
+    dep_code=$(echo "$INSTALL_OUTPUT" | jq -r '.results[0].error.code // empty')
+    dep_pkgs=$(echo "$INSTALL_OUTPUT" | jq -r '.results[0].error.packages // empty | if type=="object" then keys[] else empty end')
+
+    if [ "$dep_code" = "268" ] && [ -n "$dep_pkgs" ]; then
+        printf "Dependent package(s) not ready: %s. Attempting to start them and retry install...\n" "$(echo "$dep_pkgs" | tr '\n' ' ')"
+        for dep in $dep_pkgs; do
+            printf "Starting dependent package: %s\n" "$dep"
+            synopkg start "$dep" >/dev/null 2>&1
+        done
+
+        INSTALL_OUTPUT=$(synopkg install "$file" 2>/dev/null)
+        INSTALL_ERROR_CODE=$(echo "$INSTALL_OUTPUT" | jq -r '.error.code')
+        INSTALL_SUCCESS=$(echo "$INSTALL_OUTPUT" | jq -r '.success')
+    fi
+
+    return 0
+}
+
 printf "\n"
 printf "Select packages to update:\n"
 printf "==========================\n"
@@ -2190,9 +2409,10 @@ while [ ${#download_apps[@]} -gt 0 ]; do
                                 prev_status_output=$(synopkg status "$app_name" 2>/dev/null)
                                 prev_pkg_status=$(echo "$prev_status_output" | jq -r '.status')
                                 printf "Installing package from file: %s\n" "$selected_file"
-                                output=$(synopkg install "$selected_file" 2>/dev/null)
-                                error_code=$(echo "$output" | jq -r '.error.code')
-                                success=$(echo "$output" | jq -r '.success')
+                                install_package_with_retry "$selected_file"
+                                output="$INSTALL_OUTPUT"
+                                error_code="$INSTALL_ERROR_CODE"
+                                success="$INSTALL_SUCCESS"
                                 if [ "$success" = "true" ] && [ "$error_code" = "0" ]; then
                                     echo "Installation successful (error code: $error_code)"
                                     # Only start the application if it was running before and is not running after
@@ -2214,7 +2434,20 @@ while [ ${#download_apps[@]} -gt 0 ]; do
                                         echo "Application was running before and is already running after update. Not starting."
                                     fi
                                 else
-                                    echo "Installation failed (error code: $error_code)"
+                                    # The top-level error.code is a generic wrapper; the actual reason is nested in results[0].error
+                                    result_error_code=$(echo "$output" | jq -r '.results[0].error.code // empty')
+                                    result_error_desc=$(echo "$output" | jq -r '.results[0].error.description // empty')
+                                    result_error_pkgs=$(echo "$output" | jq -r '.results[0].error.packages // empty | if type=="object" then keys | join(", ") else empty end')
+                                    if [ -n "$result_error_desc" ]; then
+                                        printf "Installation failed (code %s): %s" "$result_error_code" "$result_error_desc"
+                                        if [ -n "$result_error_pkgs" ]; then
+                                            printf " [missing/blocking: %s]" "$result_error_pkgs"
+                                        fi
+                                        printf "\n"
+                                    else
+                                        echo "Installation failed (error code: $error_code)"
+                                    fi
+                                    printf "synopkg output: %s\n" "$output"
                                 fi
                             fi
                         else
@@ -2250,9 +2483,10 @@ while [ ${#download_apps[@]} -gt 0 ]; do
                                 prev_status_output=$(synopkg status "$app_name" 2>/dev/null)
                                 prev_pkg_status=$(echo "$prev_status_output" | jq -r '.status')
                                 printf "Installing package from file: %s\n" "$selected_file"
-                                output=$(synopkg install "$selected_file" 2>/dev/null)
-                                error_code=$(echo "$output" | jq -r '.error.code')
-                                success=$(echo "$output" | jq -r '.success')
+                                install_package_with_retry "$selected_file"
+                                output="$INSTALL_OUTPUT"
+                                error_code="$INSTALL_ERROR_CODE"
+                                success="$INSTALL_SUCCESS"
                                 if [ "$success" = "true" ] && [ "$error_code" = "0" ]; then
                                     echo "Installation successful (error code: $error_code)"
                                     # Only start the application if it was running before and is not running after
@@ -2274,7 +2508,20 @@ while [ ${#download_apps[@]} -gt 0 ]; do
                                         echo "Application was running before and is already running after update. Not starting."
                                     fi
                                 else
-                                    echo "Installation failed (error code: $error_code)"
+                                    # The top-level error.code is a generic wrapper; the actual reason is nested in results[0].error
+                                    result_error_code=$(echo "$output" | jq -r '.results[0].error.code // empty')
+                                    result_error_desc=$(echo "$output" | jq -r '.results[0].error.description // empty')
+                                    result_error_pkgs=$(echo "$output" | jq -r '.results[0].error.packages // empty | if type=="object" then keys | join(", ") else empty end')
+                                    if [ -n "$result_error_desc" ]; then
+                                        printf "Installation failed (code %s): %s" "$result_error_code" "$result_error_desc"
+                                        if [ -n "$result_error_pkgs" ]; then
+                                            printf " [missing/blocking: %s]" "$result_error_pkgs"
+                                        fi
+                                        printf "\n"
+                                    else
+                                        echo "Installation failed (error code: $error_code)"
+                                    fi
+                                    printf "synopkg output: %s\n" "$output"
                                 fi
                             fi
 
